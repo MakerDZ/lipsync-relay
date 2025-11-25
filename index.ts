@@ -1,116 +1,22 @@
-import { readFile } from "node:fs/promises";
 import { Hono } from "hono";
+import {
+  uploadFileToComfy,
+  comfyViewUrlFromPath,
+} from "./lipsync/server-adapter";
+import { generateVideoPrompt } from "./lipsync/prompt";
+import { getAvailableMachines } from "./machine/machine";
+import { initRedis } from "./lib/redis";
+import {
+  addTaskToQueue,
+  updateGeneratedVideoPath,
+  updateTaskStatus,
+  getTaskByTrackingId,
+} from "./queue/task";
 
-const PROMPT_ENDPOINT = `${process.env.COMFYUI_API_URL}/prompt`;
-const TEMPLATE_PATH = "./lipysnc.json";
-
-// - endpoint for getting videos, audio and prompt
-
-// - uploading videos, audio to gpu server
-
-// - changing prompt template to match the video and audio
-async function generateVideoPrompt(
-  newAudioFilename: string,
-  newImageFilename: string,
-  newPositivePrompt: string,
-  trackingId: string,
-  webhookUrl: string
-) {
-  console.log(`Loading workflow template from ${TEMPLATE_PATH}...`);
-
-  let promptTemplate;
-  try {
-    const templateContent = await readFile(TEMPLATE_PATH, "utf8");
-    promptTemplate = JSON.parse(templateContent);
-  } catch (e: unknown) {
-    console.error(
-      `Error loading or parsing JSON template: ${
-        e instanceof Error ? e.message : String(e)
-      }`
-    );
-    throw new Error(
-      "Could not load workflow template. Make sure 'lipysnc.json' is in the correct path."
-    );
-  }
-
-  console.log("Mapping new inputs to the workflow...");
-
-  // 1. Update LoadAudio (Node 125)
-  if (promptTemplate["125"]) {
-    promptTemplate["125"].inputs.audio = newAudioFilename;
-    console.log(`\t- Node 125 (LoadAudio) updated to: ${newAudioFilename}`);
-  }
-
-  // 2. Update LoadImage (Node 284)
-  if (promptTemplate["284"]) {
-    promptTemplate["284"].inputs.image = newImageFilename;
-    console.log(`\t- Node 284 (LoadImage) updated to: ${newImageFilename}`);
-  }
-
-  // 3. Update TextEncode (Node 241)
-  if (promptTemplate["241"]) {
-    promptTemplate["241"].inputs.positive_prompt = newPositivePrompt;
-    console.log(`\t- Node 241 (TextEncode) updated to: "${newPositivePrompt}"`);
-  }
-
-  // 4. Update Post Request Node (Node 307)
-  if (promptTemplate["307"]) {
-    // A) inject webhook URL
-    promptTemplate["307"].inputs.target_url = webhookUrl;
-
-    // B) inject tracking ID
-    promptTemplate["307"].inputs.str1 = trackingId;
-
-    // C) update the request body
-    promptTemplate["307"].inputs.request_body = `{
-  "video_path": "__str0__",
-  "status": "completed",
-  "tracking_id": "__str1__"
-}`;
-
-    console.log(
-      `\t- Node 307 (Webhook) updated with URL: ${webhookUrl} & tracking: ${trackingId}`
-    );
-  }
-
-  return promptTemplate;
-}
-
-// - hitting prompts endpoint for start generating
-
+// Initialize Redis connection
+await initRedis();
 const app = new Hono();
-
-// Function to upload files to ComfyUI server
-async function uploadFileToComfy(
-  file: File,
-  type: "image" | "audio"
-): Promise<string> {
-  const uploadUrl = `${process.env.COMFYUI_API_URL}/upload/image`;
-
-  console.log(`Uploading ${type} to ${uploadUrl}...`);
-
-  const formData = new FormData();
-  formData.append("image", file);
-  formData.append("overwrite", "true");
-
-  const response = await fetch(uploadUrl, {
-    method: "POST",
-    body: formData,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to upload ${type}: ${response.statusText}`);
-  }
-
-  const result = (await response.json()) as {
-    name: string;
-    subfolder: string;
-    type: string;
-  };
-  console.log(`\t- ${type} uploaded successfully: ${result.name}`);
-
-  return result.name;
-}
+app.get("/", (c) => c.text("Hello Bun!"));
 
 // POST endpoint for generating video
 app.post("/generate", async (c) => {
@@ -134,10 +40,18 @@ app.post("/generate", async (c) => {
     console.log(`\t- Audio: ${audio.name} (${audio.type})`);
     console.log(`\t- Prompt: "${prompt}"`);
 
-    // Upload image and audio to ComfyUI
+    // Get available machines
+    const availableMachines = await getAvailableMachines();
+
+    // If no available machines, return error
+    if (availableMachines.length === 0) {
+      return c.json({ error: "No available machines" }, 503);
+    }
+
+    // Upload image and audio to ComfyUI on the first available machine
     const [uploadedImageName, uploadedAudioName] = await Promise.all([
-      uploadFileToComfy(image, "image"),
-      uploadFileToComfy(audio, "audio"),
+      uploadFileToComfy(image, availableMachines[0]!),
+      uploadFileToComfy(audio, availableMachines[0]!),
     ]);
 
     // Generate tracking ID
@@ -145,18 +59,17 @@ app.post("/generate", async (c) => {
     console.log(`\t- Tracking ID: ${trackingId}`);
 
     // Generate video prompt
-    const webhookUrl = "http://localhost:3000/webhook";
     const promptTemplate = await generateVideoPrompt(
       uploadedAudioName,
       uploadedImageName,
       prompt,
       trackingId,
-      webhookUrl
+      `${process.env.WEBHOOK_URL}`
     );
 
     // Hit ComfyUI prompt endpoint
-    console.log("\nSending workflow to ComfyUI...");
-    const res = await fetch(PROMPT_ENDPOINT, {
+    console.log(`\nSending workflow to ComfyUI on ${availableMachines[0]}...`);
+    const res = await fetch(`${availableMachines[0]}/prompt`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -185,6 +98,19 @@ app.post("/generate", async (c) => {
       )
     );
 
+    // Add task to queue
+    await addTaskToQueue({
+      prompt_id: data.prompt_id as string,
+      tracking_id: trackingId,
+      machine: availableMachines[0]!,
+      status: "pending",
+      image_path: uploadedImageName,
+      audio_path: uploadedAudioName,
+      generated_video_path: "",
+      prompt: prompt,
+    });
+
+    // Return response
     return c.json({
       success: true,
       tracking_id: trackingId,
@@ -202,14 +128,47 @@ app.post("/generate", async (c) => {
   }
 });
 
-app.get("/", (c) => c.text("Hello Bun!"));
-
+// POST endpoint for webhook receiving from ComfyUI
 app.post("/webhook", async (c) => {
   const body = await c.req.text();
   console.log("\n=== Webhook received ===");
   console.log(body);
 
+  // Update task status to completed
+  await updateTaskStatus(JSON.parse(body).tracking_id, "completed");
+  await updateGeneratedVideoPath(
+    JSON.parse(body).tracking_id,
+    JSON.parse(body).video_path as string
+  );
+
   return c.json({ message: "Webhook received" });
+});
+
+app.get("/download/:trackingId", async (c) => {
+  const trackingId = c.req.param("trackingId");
+
+  const task = await getTaskByTrackingId(trackingId);
+  const videoPath = task?.generated_video_path;
+  if (!videoPath) {
+    return c.json({ error: "Unknown tracking_id or not finished yet" }, 404);
+  }
+  const comfyUrl = comfyViewUrlFromPath(videoPath, task?.machine!);
+  console.log(`Proxying download for ${trackingId} from ${comfyUrl}`);
+
+  const res = await fetch(comfyUrl);
+  if (!res.ok) {
+    console.error("Comfy download failed:", res.status, res.statusText);
+    return c.json({ error: "Failed to fetch video from ComfyUI" }, 502);
+  }
+
+  // stream back to client
+  return new Response(res.body, {
+    status: 200,
+    headers: {
+      "Content-Type": res.headers.get("Content-Type") ?? "video/mp4",
+      "Content-Disposition": `attachment; filename="${trackingId}.mp4"`,
+    },
+  });
 });
 
 export default {
