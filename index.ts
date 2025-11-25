@@ -16,6 +16,7 @@ import {
   getOneWaitingTaskFromQueue,
 } from "./queue/waiting-task";
 import { acquireLock, releaseLock } from "./lib/redis-lock";
+import { deleteFileFromR2, uploadFileToR2 } from "./lib/r2";
 
 // Initialize Redis connection
 await initRedis();
@@ -50,9 +51,12 @@ app.post("/generate", async (c) => {
     // If no available machines, return error
     if (availableMachines.length === 0) {
       // r2 setup for storing those files as temporary
+
+      const imageUrl = await uploadFileToR2(image);
+      const audioUrl = await uploadFileToR2(audio);
       await addWaitingTaskToQueue({
-        image_url: "image.url",
-        audio_url: "audio.url",
+        image_url: imageUrl,
+        audio_url: audioUrl,
         prompt: prompt,
       });
       return c.json(
@@ -122,6 +126,8 @@ app.post("/webhook", async (c) => {
       );
 
       await deleteWaitingTask(waitingTask.id);
+      await deleteFileFromR2(waitingTask.image_url);
+      await deleteFileFromR2(waitingTask.audio_url);
 
       return c.json(lipsyncData);
     }

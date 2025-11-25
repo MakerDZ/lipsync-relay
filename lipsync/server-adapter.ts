@@ -82,7 +82,7 @@ export async function uploadFileToComfy(
   file: File,
   machine: string
 ): Promise<string> {
-  const uploadUrl = `${process.env.COMFYUI_API_URL}/upload/image`;
+  const uploadUrl = `${machine}/upload/image`;
 
   console.log(`Uploading file to ${uploadUrl}...`);
 
