@@ -17,6 +17,7 @@ import {
 } from "./queue/waiting-task";
 import { acquireLock, releaseLock } from "./lib/redis-lock";
 import { deleteFileFromR2, uploadFileToR2 } from "./lib/r2";
+import { getWaitingTaskByTrackingId } from "./queue/waiting-task";
 
 // Initialize Redis connection
 await initRedis();
@@ -51,17 +52,22 @@ app.post("/generate", async (c) => {
     // If no available machines, return error
     if (availableMachines.length === 0) {
       // r2 setup for storing those files as temporary
+      const trackingId = crypto.randomUUID();
 
       const imageUrl = await uploadFileToR2(image);
       const audioUrl = await uploadFileToR2(audio);
       await addWaitingTaskToQueue({
+        id: trackingId,
         image_url: imageUrl,
         audio_url: audioUrl,
         prompt: prompt,
       });
       return c.json(
-        { error: "No available machines, Added to waiting queue" },
-        503
+        {
+          tracking_id: trackingId,
+          status: "waiting_for_free_machine",
+        },
+        200
       );
     }
 
@@ -163,6 +169,19 @@ app.get("/download/:trackingId", async (c) => {
       "Content-Type": res.headers.get("Content-Type") ?? "video/mp4",
       "Content-Disposition": `attachment; filename="${trackingId}.mp4"`,
     },
+  });
+});
+
+app.get("/tracking/:trackingId", async (c) => {
+  const trackingId = c.req.param("trackingId");
+  const waitingTask = await getWaitingTaskByTrackingId(trackingId);
+  const task = await getTaskByTrackingId(trackingId);
+  if (!waitingTask && !task) {
+    return c.json({ error: "Unknown tracking_id" }, 404);
+  }
+  return c.json({
+    tracking_id: trackingId,
+    status: waitingTask ? "still_waiting_for_free_machine" : task?.status,
   });
 });
 

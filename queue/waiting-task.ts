@@ -9,6 +9,7 @@ export interface WaitingTask {
 }
 
 export interface WaitingTaskInput {
+  id: string;
   image_url: string;
   audio_url: string;
   prompt: string;
@@ -24,9 +25,7 @@ export async function addWaitingTaskToQueue(
       throw new Error("Redis connection not established");
     }
 
-    // Generate a unique ID for the task
     const waitingTask: WaitingTask = {
-      id: randomUUID(),
       ...waitingTaskInput,
     };
 
@@ -34,6 +33,35 @@ export async function addWaitingTaskToQueue(
     return waitingTask;
   } catch (error) {
     console.error("Error adding waiting task to queue:", error);
+    throw error;
+  }
+}
+
+// Get a waiting task by tracking ID
+export async function getWaitingTaskByTrackingId(
+  trackingId: string
+): Promise<WaitingTask | null> {
+  try {
+    const redis = getRedis();
+    if (!redis) {
+      throw new Error("Redis connection not established");
+    }
+
+    const queueLength = await redis.llen("waiting_queue");
+
+    for (let i = 0; i < queueLength; i++) {
+      const waitingTask = await redis.lindex("waiting_queue", i);
+      if (waitingTask) {
+        const task = JSON.parse(waitingTask) as WaitingTask;
+        if (task.id === trackingId) {
+          return task;
+        }
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error("Error getting waiting task by tracking ID:", error);
     throw error;
   }
 }
