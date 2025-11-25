@@ -1,4 +1,6 @@
-const machines = process.env.MACHINE_LIST?.split(",") ?? [];
+const machines = (process.env.MACHINE_LIST?.split(",") ?? [])
+  .map((m) => m.trim())
+  .filter((m) => m.length > 0);
 
 interface QueueResponse {
   queue_running: any[];
@@ -10,6 +12,7 @@ export async function getAvailableMachines(): Promise<string[]> {
   const availableMachines = [];
 
   for (const machine of machines) {
+    console.log(`Checking machine ${machine}...`);
     try {
       const response = await fetch(`${machine}/queue`, {
         method: "GET",
