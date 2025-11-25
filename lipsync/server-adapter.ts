@@ -6,7 +6,8 @@ export async function generateLipsyncVideo(
   machine: string,
   image: File,
   audio: File,
-  prompt: string
+  prompt: string,
+  existingTrackingId?: string
 ): Promise<Record<string, unknown>> {
   // Upload image and audio to ComfyUI on the first available machine
   const [uploadedImageName, uploadedAudioName] = await Promise.all([
@@ -15,7 +16,7 @@ export async function generateLipsyncVideo(
   ]);
 
   // Generate tracking ID
-  const trackingId = crypto.randomUUID();
+  const trackingId = existingTrackingId ?? crypto.randomUUID();
   console.log(`\t- Tracking ID: ${trackingId}`);
 
   // Generate video prompt

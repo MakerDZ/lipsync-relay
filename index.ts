@@ -56,8 +56,10 @@ app.post("/generate", async (c) => {
       // r2 setup for storing those files as temporary
       const trackingId = crypto.randomUUID();
 
-      const imageUrl = await uploadFileToR2(image);
-      const audioUrl = await uploadFileToR2(audio);
+      const [imageUrl, audioUrl] = await Promise.all([
+        uploadFileToR2(image),
+        uploadFileToR2(audio),
+      ]);
       await addWaitingTaskToQueue({
         id: trackingId,
         image_url: imageUrl,
@@ -73,13 +75,24 @@ app.post("/generate", async (c) => {
       );
     }
 
-    const lipsyncData = await generateLipsyncVideo(
+    const trackingId = crypto.randomUUID();
+
+    void generateLipsyncVideo(
       availableMachines[0]!,
       image,
       audio,
-      prompt
-    );
-    return c.json(lipsyncData);
+      prompt,
+      trackingId
+    ).catch((error) => {
+      console.error("Background generation failed:", error);
+    });
+
+    return c.json({
+      success: true,
+      tracking_id: trackingId,
+      status: "processing",
+      message: "Generation started",
+    });
   } catch (error: unknown) {
     console.error("Error processing generate request:", error);
     return c.json(
@@ -91,6 +104,48 @@ app.post("/generate", async (c) => {
     );
   }
 });
+
+// Process waiting queue every 5 seconds
+async function processWaitingQueue(): Promise<void> {
+  const lockToken = await acquireLock("waiting_queue", 5000);
+
+  if (!lockToken) {
+    console.log("Another scheduler is already processing the waiting queue.");
+    return;
+  }
+
+  try {
+    const [waitingTask, machines] = await Promise.all([
+      getOneWaitingTaskFromQueue(),
+      getAvailableMachines(),
+    ]);
+
+    if (waitingTask && machines.length > 0) {
+      const [imageFile, audioFile] = await Promise.all([
+        fetch(waitingTask.image_url).then((res) => res.blob()),
+        fetch(waitingTask.audio_url).then((res) => res.blob()),
+      ]);
+
+      await generateLipsyncVideo(
+        machines[0]!,
+        imageFile as unknown as File,
+        audioFile as unknown as File,
+        waitingTask.prompt,
+        waitingTask.id
+      );
+
+      await deleteWaitingTask(waitingTask.id);
+      await Promise.all([
+        deleteFileFromR2(waitingTask.image_url),
+        deleteFileFromR2(waitingTask.audio_url),
+      ]);
+    }
+  } catch (error) {
+    console.error("Error processing waiting queue:", error);
+  } finally {
+    await releaseLock("waiting_queue", lockToken);
+  }
+}
 
 // POST endpoint for webhook receiving from ComfyUI
 app.post("/webhook", async (c) => {
@@ -105,46 +160,7 @@ app.post("/webhook", async (c) => {
   await updateTaskStatus(trackingId, "completed");
   await updateGeneratedVideoPath(trackingId, parsed.video_path);
 
-  // Try to acquire lock to process waiting queue
-  const lockToken = await acquireLock("waiting_queue", 5000);
-
-  if (!lockToken) {
-    console.log("Another scheduler is already processing the waiting queue.");
-    return c.json({ status: "ok" });
-  }
-
-  try {
-    // We have the lock, process waiting queue safely
-    const waitingTask = await getOneWaitingTaskFromQueue();
-    const machines = await getAvailableMachines();
-
-    if (waitingTask && machines.length > 0) {
-      const imageFile = await fetch(waitingTask.image_url).then((res) =>
-        res.blob()
-      );
-      const audioFile = await fetch(waitingTask.audio_url).then((res) =>
-        res.blob()
-      );
-
-      const lipsyncData = await generateLipsyncVideo(
-        machines[0]!,
-        imageFile as unknown as File,
-        audioFile as unknown as File,
-        waitingTask.prompt
-      );
-
-      await deleteWaitingTask(waitingTask.id);
-      await deleteFileFromR2(waitingTask.image_url);
-      await deleteFileFromR2(waitingTask.audio_url);
-
-      return c.json(lipsyncData);
-    }
-
-    return c.json({ status: "ok" });
-  } finally {
-    // Always release lock
-    await releaseLock("waiting_queue", lockToken);
-  }
+  return c.json({ status: "ok" });
 });
 
 app.get("/download/:trackingId", async (c) => {
@@ -187,40 +203,9 @@ app.get("/tracking/:trackingId", async (c) => {
   });
 });
 
-setInterval(async () => {
-  console.log("Checking waiting queue for free machine every 3 seconds...");
-  const lock = await acquireLock("waiting_queue", 5000);
-  if (!lock) return; // someone else is doing it
-
-  try {
-    const waitingTask = await getOneWaitingTaskFromQueue();
-    if (!waitingTask) return;
-
-    const machines = await getAvailableMachines();
-    console.log(`\t- Available machines: ${machines.join(", ")}`);
-    if (machines.length === 0) return;
-
-    const imageFile = await fetch(waitingTask.image_url).then((res) =>
-      res.blob()
-    );
-    const audioFile = await fetch(waitingTask.audio_url).then((res) =>
-      res.blob()
-    );
-
-    await generateLipsyncVideo(
-      machines[0]!,
-      imageFile as unknown as File,
-      audioFile as unknown as File,
-      waitingTask.prompt
-    );
-
-    await deleteWaitingTask(waitingTask.id);
-    await deleteFileFromR2(waitingTask.image_url);
-    await deleteFileFromR2(waitingTask.audio_url);
-  } finally {
-    await releaseLock("waiting_queue", lock);
-  }
-}, 3000); 
+setInterval(() => {
+  void processWaitingQueue();
+}, 5000);
 
 export default {
   port: 3000,
