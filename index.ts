@@ -1,17 +1,21 @@
 import { Hono } from "hono";
 import {
-  uploadFileToComfy,
   comfyViewUrlFromPath,
+  generateLipsyncVideo,
 } from "./lipsync/server-adapter";
-import { generateVideoPrompt } from "./lipsync/prompt";
 import { getAvailableMachines } from "./machine/machine";
 import { initRedis } from "./lib/redis";
 import {
-  addTaskToQueue,
   updateGeneratedVideoPath,
   updateTaskStatus,
   getTaskByTrackingId,
 } from "./queue/task";
+import {
+  addWaitingTaskToQueue,
+  deleteWaitingTask,
+  getOneWaitingTaskFromQueue,
+} from "./queue/waiting-task";
+import { acquireLock, releaseLock } from "./lib/redis-lock";
 
 // Initialize Redis connection
 await initRedis();
@@ -45,82 +49,30 @@ app.post("/generate", async (c) => {
 
     // If no available machines, return error
     if (availableMachines.length === 0) {
-      return c.json({ error: "No available machines" }, 503);
+      // r2 setup for storing those files as temporary
+      await addWaitingTaskToQueue({
+        image_url: "image.url",
+        audio_url: "audio.url",
+        prompt: prompt,
+      });
+      return c.json(
+        { error: "No available machines, Added to waiting queue" },
+        503
+      );
     }
 
-    // Upload image and audio to ComfyUI on the first available machine
-    const [uploadedImageName, uploadedAudioName] = await Promise.all([
-      uploadFileToComfy(image, availableMachines[0]!),
-      uploadFileToComfy(audio, availableMachines[0]!),
-    ]);
-
-    // Generate tracking ID
-    const trackingId = crypto.randomUUID();
-    console.log(`\t- Tracking ID: ${trackingId}`);
-
-    // Generate video prompt
-    const promptTemplate = await generateVideoPrompt(
-      uploadedAudioName,
-      uploadedImageName,
-      prompt,
-      trackingId,
-      `${process.env.WEBHOOK_URL}`
+    const lipsyncData = await generateLipsyncVideo(
+      availableMachines[0]!,
+      image,
+      audio,
+      prompt
     );
-
-    // Hit ComfyUI prompt endpoint
-    console.log(`\nSending workflow to ComfyUI on ${availableMachines[0]}...`);
-    const res = await fetch(`${availableMachines[0]}/prompt`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt: promptTemplate,
-        client_id: trackingId,
-      }),
-    });
-
-    if (!res.ok) {
-      throw new Error(`ComfyUI API error: ${res.statusText}`);
-    }
-
-    const data = (await res.json()) as Record<string, unknown>;
-
-    // Console log without sensitive data
-    console.log("\n=== ComfyUI Response ===");
-    console.log(
-      JSON.stringify(
-        {
-          ...data,
-          tracking_id: trackingId,
-          status: "queued",
-        },
-        null,
-        2
-      )
-    );
-
-    // Add task to queue
-    await addTaskToQueue({
-      prompt_id: data.prompt_id as string,
-      tracking_id: trackingId,
-      machine: availableMachines[0]!,
-      status: "pending",
-      image_path: uploadedImageName,
-      audio_path: uploadedAudioName,
-      generated_video_path: "",
-      prompt: prompt,
-    });
-
-    // Return response
-    return c.json({
-      success: true,
-      tracking_id: trackingId,
-      comfyui_response: data,
-    });
+    return c.json(lipsyncData);
   } catch (error: unknown) {
-    console.error("Error processing request:", error);
+    console.error("Error processing generate request:", error);
     return c.json(
       {
-        error: "Failed to process request",
+        error: "Failed to process generate request",
         message: error instanceof Error ? error.message : String(error),
       },
       500
@@ -131,17 +83,54 @@ app.post("/generate", async (c) => {
 // POST endpoint for webhook receiving from ComfyUI
 app.post("/webhook", async (c) => {
   const body = await c.req.text();
-  console.log("\n=== Webhook received ===");
-  console.log(body);
+  const parsed = JSON.parse(body);
 
-  // Update task status to completed
-  await updateTaskStatus(JSON.parse(body).tracking_id, "completed");
-  await updateGeneratedVideoPath(
-    JSON.parse(body).tracking_id,
-    JSON.parse(body).video_path as string
-  );
+  console.log("Webhook received:", parsed);
 
-  return c.json({ message: "Webhook received" });
+  const trackingId = parsed.tracking_id;
+
+  // Update the finished job in DB/Redis
+  await updateTaskStatus(trackingId, "completed");
+  await updateGeneratedVideoPath(trackingId, parsed.video_path);
+
+  // Try to acquire lock to process waiting queue
+  const lockToken = await acquireLock("waiting_queue", 5000);
+
+  if (!lockToken) {
+    console.log("Another scheduler is already processing the waiting queue.");
+    return c.json({ status: "ok" });
+  }
+
+  try {
+    // We have the lock, process waiting queue safely
+    const waitingTask = await getOneWaitingTaskFromQueue();
+    const machines = await getAvailableMachines();
+
+    if (waitingTask && machines.length > 0) {
+      const imageFile = await fetch(waitingTask.image_url).then((res) =>
+        res.blob()
+      );
+      const audioFile = await fetch(waitingTask.audio_url).then((res) =>
+        res.blob()
+      );
+
+      const lipsyncData = await generateLipsyncVideo(
+        machines[0]!,
+        imageFile as unknown as File,
+        audioFile as unknown as File,
+        waitingTask.prompt
+      );
+
+      await deleteWaitingTask(waitingTask.id);
+
+      return c.json(lipsyncData);
+    }
+
+    return c.json({ status: "ok" });
+  } finally {
+    // Always release lock
+    await releaseLock("waiting_queue", lockToken);
+  }
 });
 
 app.get("/download/:trackingId", async (c) => {
