@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-const TEMPLATE_PATH = "./lipysnc.json";
+const TEMPLATE_PATH = "./lipsync.json";
 
 // - changing prompt template to match the video and audio
 export async function generateVideoPrompt(

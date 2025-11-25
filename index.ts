@@ -48,6 +48,8 @@ app.post("/generate", async (c) => {
 
     // Get available machines
     const availableMachines = await getAvailableMachines();
+    console.log("\n=== Available machines ===");
+    console.log(`\t- Available machines: ${availableMachines.join(", ")}`);
 
     // If no available machines, return error
     if (availableMachines.length === 0) {
