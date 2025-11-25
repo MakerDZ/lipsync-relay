@@ -187,6 +187,41 @@ app.get("/tracking/:trackingId", async (c) => {
   });
 });
 
+setInterval(async () => {
+  console.log("Checking waiting queue for free machine every 3 seconds...");
+  const lock = await acquireLock("waiting_queue", 5000);
+  if (!lock) return; // someone else is doing it
+
+  try {
+    const waitingTask = await getOneWaitingTaskFromQueue();
+    if (!waitingTask) return;
+
+    const machines = await getAvailableMachines();
+    console.log(`\t- Available machines: ${machines.join(", ")}`);
+    if (machines.length === 0) return;
+
+    const imageFile = await fetch(waitingTask.image_url).then((res) =>
+      res.blob()
+    );
+    const audioFile = await fetch(waitingTask.audio_url).then((res) =>
+      res.blob()
+    );
+
+    await generateLipsyncVideo(
+      machines[0]!,
+      imageFile as unknown as File,
+      audioFile as unknown as File,
+      waitingTask.prompt
+    );
+
+    await deleteWaitingTask(waitingTask.id);
+    await deleteFileFromR2(waitingTask.image_url);
+    await deleteFileFromR2(waitingTask.audio_url);
+  } finally {
+    await releaseLock("waiting_queue", lock);
+  }
+}, 3000); 
+
 export default {
   port: 3000,
   fetch: app.fetch,

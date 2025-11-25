@@ -83,20 +83,30 @@ export async function uploadFileToComfy(
   machine: string
 ): Promise<string> {
   const uploadUrl = `${machine}/upload/image`;
-
   console.log(`Uploading file to ${uploadUrl}...`);
 
   const formData = new FormData();
-  formData.append("image", file);
+  formData.append("image", file, file.name);
   formData.append("overwrite", "true");
+  formData.append("type", "input");
 
-  const response = await fetch(`${machine}/upload/image`, {
+  const response = await fetch(uploadUrl, {
     method: "POST",
     body: formData,
   });
 
+  console.log(
+    `\t- Upload response status: ${response.status} ${response.statusText}`
+  );
+
   if (!response.ok) {
-    throw new Error(`Failed to upload file: ${response.statusText}`);
+    const errorBody = await response.text();
+    console.error(`\t- Upload error body: ${errorBody}`);
+    throw new Error(
+      `Failed to upload file: ${response.status} ${
+        response.statusText || "Unknown error"
+      } - ${errorBody}`
+    );
   }
 
   const result = (await response.json()) as {
