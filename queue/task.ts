@@ -1,4 +1,5 @@
-import { getRedis } from "../lib/redis";
+import type Redis from "ioredis";
+import { withRedis } from "../lib/redis";
 
 export interface Task {
   prompt_id: string;
@@ -11,14 +12,27 @@ export interface Task {
   prompt: string;
 }
 
+async function readTaskQueue(redis: Redis): Promise<Task[]> {
+  const rawTasks = await redis.lrange("queue", 0, -1);
+  const tasks: Task[] = [];
+
+  for (const entry of rawTasks) {
+    try {
+      tasks.push(JSON.parse(entry));
+    } catch (error) {
+      console.warn("Skipping invalid task entry:", error);
+    }
+  }
+
+  return tasks;
+}
+
 // Add a task to the queue
 export async function addTaskToQueue(task: Task) {
   try {
-    const redis = getRedis();
-    if (!redis) {
-      throw new Error("Redis connection not established");
-    }
-    await redis.lpush("queue", JSON.stringify(task));
+    await withRedis("addTaskToQueue", async (redis) => {
+      await redis.lpush("queue", JSON.stringify(task));
+    });
   } catch (error) {
     console.error("Error adding task to queue:", error);
     throw error;
@@ -31,45 +45,23 @@ export async function updateTaskStatus(
   status: "pending" | "running" | "completed" | "failed"
 ): Promise<boolean> {
   try {
-    const redis = getRedis();
-    if (!redis) {
-      throw new Error("Redis connection not established");
-    }
-
-    // Get all tasks from the queue
-    const queueLength = await redis.llen("queue");
-    const tasks: Task[] = [];
-
-    for (let i = 0; i < queueLength; i++) {
-      const taskStr = await redis.lindex("queue", i);
-      if (taskStr) {
-        tasks.push(JSON.parse(taskStr));
+    return await withRedis("updateTaskStatus", async (redis) => {
+      const tasks = await readTaskQueue(redis);
+      const taskIndex = tasks.findIndex((t) => t.tracking_id === tracking_id);
+      if (taskIndex === -1) {
+        console.warn(`Task with tracking_id ${tracking_id} not found`);
+        return false;
       }
-    }
 
-    // Find and update the task
-    const taskIndex = tasks.findIndex((t) => t.tracking_id === tracking_id);
-    if (taskIndex === -1) {
-      console.warn(`Task with tracking_id ${tracking_id} not found`);
-      return false;
-    }
+      tasks[taskIndex]!.status = status;
 
-    const task = tasks[taskIndex];
-    if (!task) {
-      console.warn(`Task with tracking_id ${tracking_id} not found`);
-      return false;
-    }
+      await redis.del("queue");
+      for (const task of tasks.reverse()) {
+        await redis.lpush("queue", JSON.stringify(task));
+      }
 
-    // Update the task status
-    task.status = status;
-
-    // Rebuild the queue
-    await redis.del("queue");
-    for (const task of tasks.reverse()) {
-      await redis.lpush("queue", JSON.stringify(task));
-    }
-
-    return true;
+      return true;
+    });
   } catch (error) {
     console.error("Error updating task status:", error);
     throw error;
@@ -82,45 +74,23 @@ export async function updateGeneratedVideoPath(
   generated_video_path: string
 ): Promise<boolean> {
   try {
-    const redis = getRedis();
-    if (!redis) {
-      throw new Error("Redis connection not established");
-    }
-
-    // Get all tasks from the queue
-    const queueLength = await redis.llen("queue");
-    const tasks: Task[] = [];
-
-    for (let i = 0; i < queueLength; i++) {
-      const taskStr = await redis.lindex("queue", i);
-      if (taskStr) {
-        tasks.push(JSON.parse(taskStr));
+    return await withRedis("updateGeneratedVideoPath", async (redis) => {
+      const tasks = await readTaskQueue(redis);
+      const taskIndex = tasks.findIndex((t) => t.tracking_id === tracking_id);
+      if (taskIndex === -1) {
+        console.warn(`Task with tracking_id ${tracking_id} not found`);
+        return false;
       }
-    }
 
-    // Find and update the task
-    const taskIndex = tasks.findIndex((t) => t.tracking_id === tracking_id);
-    if (taskIndex === -1) {
-      console.warn(`Task with tracking_id ${tracking_id} not found`);
-      return false;
-    }
+      tasks[taskIndex]!.generated_video_path = generated_video_path;
 
-    const task = tasks[taskIndex];
-    if (!task) {
-      console.warn(`Task with tracking_id ${tracking_id} not found`);
-      return false;
-    }
+      await redis.del("queue");
+      for (const task of tasks.reverse()) {
+        await redis.lpush("queue", JSON.stringify(task));
+      }
 
-    // Update the generated_video_path
-    task.generated_video_path = generated_video_path;
-
-    // Rebuild the queue
-    await redis.del("queue");
-    for (const task of tasks.reverse()) {
-      await redis.lpush("queue", JSON.stringify(task));
-    }
-
-    return true;
+      return true;
+    });
   } catch (error) {
     console.error("Error updating generated_video_path:", error);
     throw error;
@@ -132,24 +102,10 @@ export async function getTaskByTrackingId(
   tracking_id: string
 ): Promise<Task | null> {
   try {
-    const redis = getRedis();
-    if (!redis) {
-      throw new Error("Redis connection not established");
-    }
-
-    const queueLength = await redis.llen("queue");
-
-    for (let i = 0; i < queueLength; i++) {
-      const taskStr = await redis.lindex("queue", i);
-      if (taskStr) {
-        const task = JSON.parse(taskStr) as Task;
-        if (task.tracking_id === tracking_id) {
-          return task;
-        }
-      }
-    }
-
-    return null;
+    return await withRedis("getTaskByTrackingId", async (redis) => {
+      const tasks = await readTaskQueue(redis);
+      return tasks.find((task) => task.tracking_id === tracking_id) ?? null;
+    });
   } catch (error) {
     console.error("Error getting task by tracking_id:", error);
     throw error;
@@ -159,22 +115,9 @@ export async function getTaskByTrackingId(
 // Get all tasks from the queue
 export async function getAllTasks(): Promise<Task[]> {
   try {
-    const redis = getRedis();
-    if (!redis) {
-      throw new Error("Redis connection not established");
-    }
-
-    const queueLength = await redis.llen("queue");
-    const tasks: Task[] = [];
-
-    for (let i = 0; i < queueLength; i++) {
-      const taskStr = await redis.lindex("queue", i);
-      if (taskStr) {
-        tasks.push(JSON.parse(taskStr));
-      }
-    }
-
-    return tasks;
+    return await withRedis("getAllTasks", async (redis) => {
+      return await readTaskQueue(redis);
+    });
   } catch (error) {
     console.error("Error getting all tasks:", error);
     throw error;
