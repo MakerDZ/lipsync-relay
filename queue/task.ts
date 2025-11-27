@@ -10,6 +10,26 @@ export interface Task {
   audio_path: string;
   generated_video_path: string;
   prompt: string;
+  /**
+   * Size of the uploaded audio blob in bytes. Null when unknown (legacy tasks).
+   */
+  audio_length_bytes?: number | null;
+  /**
+   * Duration of the audio clip in seconds.
+   */
+  audio_duration_seconds?: number | null;
+  /**
+   * ISO timestamp when the task was inserted into the queue.
+   */
+  created_at?: string;
+  /**
+   * ISO timestamp when the task finished successfully.
+   */
+  completed_at?: string | null;
+  /**
+   * Total processing time in milliseconds, derived from created/completed timestamps.
+   */
+  time_to_complete_ms?: number | null;
 }
 
 async function readTaskQueue(redis: Redis): Promise<Task[]> {
@@ -31,7 +51,7 @@ async function readTaskQueue(redis: Redis): Promise<Task[]> {
 export async function addTaskToQueue(task: Task) {
   try {
     await withRedis("addTaskToQueue", async (redis) => {
-    await redis.lpush("queue", JSON.stringify(task));
+      await redis.lpush("queue", JSON.stringify(task));
     });
   } catch (error) {
     console.error("Error adding task to queue:", error);
@@ -47,20 +67,39 @@ export async function updateTaskStatus(
   try {
     return await withRedis("updateTaskStatus", async (redis) => {
       const tasks = await readTaskQueue(redis);
-    const taskIndex = tasks.findIndex((t) => t.tracking_id === tracking_id);
-    if (taskIndex === -1) {
-      console.warn(`Task with tracking_id ${tracking_id} not found`);
-      return false;
-    }
+      const taskIndex = tasks.findIndex((t) => t.tracking_id === tracking_id);
+      if (taskIndex === -1) {
+        console.warn(`Task with tracking_id ${tracking_id} not found`);
+        return false;
+      }
 
-      tasks[taskIndex]!.status = status;
+      const task = tasks[taskIndex]!;
+      task.status = status;
 
-    await redis.del("queue");
-    for (const task of tasks.reverse()) {
-      await redis.lpush("queue", JSON.stringify(task));
-    }
+      if (status === "completed") {
+        const completedAt = task.completed_at ?? new Date().toISOString();
+        task.completed_at = completedAt;
 
-    return true;
+        if (
+          task.time_to_complete_ms == null &&
+          task.created_at &&
+          !Number.isNaN(Date.parse(task.created_at))
+        ) {
+          const startedAt = Date.parse(task.created_at);
+          const finishedAt = Date.parse(completedAt);
+          if (!Number.isNaN(startedAt) && !Number.isNaN(finishedAt)) {
+            const elapsed = finishedAt - startedAt;
+            task.time_to_complete_ms = elapsed >= 0 ? elapsed : null;
+          }
+        }
+      }
+
+      await redis.del("queue");
+      for (const task of tasks.reverse()) {
+        await redis.lpush("queue", JSON.stringify(task));
+      }
+
+      return true;
     });
   } catch (error) {
     console.error("Error updating task status:", error);

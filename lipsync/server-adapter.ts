@@ -1,5 +1,8 @@
+import { Buffer } from "node:buffer";
+import { parseBuffer } from "music-metadata";
 import { generateVideoPrompt } from "./prompt";
 import { addTaskToQueue } from "../queue/task";
+import { getAudioDurationSeconds } from "../utils/audio";
 
 // Function to generate lipsync video
 export async function generateLipsyncVideo(
@@ -9,6 +12,8 @@ export async function generateLipsyncVideo(
   prompt: string,
   existingTrackingId?: string
 ): Promise<Record<string, unknown>> {
+  const audioDurationSeconds = await getAudioDurationSeconds(audio);
+
   // Upload image and audio to ComfyUI on the first available machine
   const [uploadedImageName, uploadedAudioName] = await Promise.all([
     uploadFileToComfy(image, machine),
@@ -60,6 +65,8 @@ export async function generateLipsyncVideo(
   );
 
   // Add task to queue
+  const nowIso = new Date().toISOString();
+
   await addTaskToQueue({
     prompt_id: data.prompt_id as string,
     tracking_id: trackingId,
@@ -69,6 +76,11 @@ export async function generateLipsyncVideo(
     audio_path: uploadedAudioName,
     generated_video_path: "",
     prompt: prompt,
+    audio_length_bytes: audio.size ?? null,
+    audio_duration_seconds: audioDurationSeconds,
+    created_at: nowIso,
+    completed_at: null,
+    time_to_complete_ms: null,
   });
 
   return {
