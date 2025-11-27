@@ -31,7 +31,7 @@ async function readTaskQueue(redis: Redis): Promise<Task[]> {
 export async function addTaskToQueue(task: Task) {
   try {
     await withRedis("addTaskToQueue", async (redis) => {
-      await redis.lpush("queue", JSON.stringify(task));
+    await redis.lpush("queue", JSON.stringify(task));
     });
   } catch (error) {
     console.error("Error adding task to queue:", error);
@@ -47,20 +47,20 @@ export async function updateTaskStatus(
   try {
     return await withRedis("updateTaskStatus", async (redis) => {
       const tasks = await readTaskQueue(redis);
-      const taskIndex = tasks.findIndex((t) => t.tracking_id === tracking_id);
-      if (taskIndex === -1) {
-        console.warn(`Task with tracking_id ${tracking_id} not found`);
-        return false;
-      }
+    const taskIndex = tasks.findIndex((t) => t.tracking_id === tracking_id);
+    if (taskIndex === -1) {
+      console.warn(`Task with tracking_id ${tracking_id} not found`);
+      return false;
+    }
 
       tasks[taskIndex]!.status = status;
 
-      await redis.del("queue");
-      for (const task of tasks.reverse()) {
-        await redis.lpush("queue", JSON.stringify(task));
-      }
+    await redis.del("queue");
+    for (const task of tasks.reverse()) {
+      await redis.lpush("queue", JSON.stringify(task));
+    }
 
-      return true;
+    return true;
     });
   } catch (error) {
     console.error("Error updating task status:", error);
@@ -76,20 +76,20 @@ export async function updateGeneratedVideoPath(
   try {
     return await withRedis("updateGeneratedVideoPath", async (redis) => {
       const tasks = await readTaskQueue(redis);
-      const taskIndex = tasks.findIndex((t) => t.tracking_id === tracking_id);
-      if (taskIndex === -1) {
-        console.warn(`Task with tracking_id ${tracking_id} not found`);
-        return false;
-      }
+    const taskIndex = tasks.findIndex((t) => t.tracking_id === tracking_id);
+    if (taskIndex === -1) {
+      console.warn(`Task with tracking_id ${tracking_id} not found`);
+      return false;
+    }
 
       tasks[taskIndex]!.generated_video_path = generated_video_path;
 
-      await redis.del("queue");
-      for (const task of tasks.reverse()) {
-        await redis.lpush("queue", JSON.stringify(task));
-      }
+    await redis.del("queue");
+    for (const task of tasks.reverse()) {
+      await redis.lpush("queue", JSON.stringify(task));
+    }
 
-      return true;
+    return true;
     });
   } catch (error) {
     console.error("Error updating generated_video_path:", error);

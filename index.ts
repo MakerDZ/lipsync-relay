@@ -24,6 +24,16 @@ await initRedis();
 const app = new Hono();
 app.get("/", (c) => c.text("Hello Bun!"));
 
+function fileNameFromUrl(url: string, fallback: string): string {
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    return parts.at(-1) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 // POST endpoint for generating video
 app.post("/generate", async (c) => {
   try {
@@ -107,29 +117,56 @@ app.post("/generate", async (c) => {
 
 // Process waiting queue every 5 seconds
 async function processWaitingQueue(): Promise<void> {
-  const lockToken = await acquireLock("waiting_queue", 5000);
-
-  if (!lockToken) {
-    console.log("Another scheduler is already processing the waiting queue.");
-    return;
-  }
-
+  console.log("Processing waiting queue");
   try {
     const [waitingTask, machines] = await Promise.all([
       getOneWaitingTaskFromQueue(),
       getAvailableMachines(),
     ]);
 
-    if (waitingTask && machines.length > 0) {
-      const [imageFile, audioFile] = await Promise.all([
-        fetch(waitingTask.image_url).then((res) => res.blob()),
-        fetch(waitingTask.audio_url).then((res) => res.blob()),
+    if (!waitingTask) {
+      return;
+    }
+
+    if (machines.length === 0) {
+      return;
+    }
+
+    try {
+      const [imageBlob, audioBlob] = await Promise.all([
+        fetch(waitingTask.image_url).then((res) => {
+          if (!res.ok) {
+            throw new Error(
+              `Failed to download image blob: ${res.status} ${res.statusText}`
+            );
+          }
+          return res.blob();
+        }),
+        fetch(waitingTask.audio_url).then((res) => {
+          if (!res.ok) {
+            throw new Error(
+              `Failed to download audio blob: ${res.status} ${res.statusText}`
+            );
+          }
+          return res.blob();
+        }),
       ]);
+
+      const imageFile = new File(
+        [imageBlob],
+        fileNameFromUrl(waitingTask.image_url, "waiting-image.bin"),
+        { type: imageBlob.type || "application/octet-stream" }
+      );
+      const audioFile = new File(
+        [audioBlob],
+        fileNameFromUrl(waitingTask.audio_url, "waiting-audio.bin"),
+        { type: audioBlob.type || "application/octet-stream" }
+      );
 
       await generateLipsyncVideo(
         machines[0]!,
-        imageFile as unknown as File,
-        audioFile as unknown as File,
+        imageFile,
+        audioFile,
         waitingTask.prompt,
         waitingTask.id
       );
@@ -139,11 +176,19 @@ async function processWaitingQueue(): Promise<void> {
         deleteFileFromR2(waitingTask.image_url),
         deleteFileFromR2(waitingTask.audio_url),
       ]);
+      console.log(
+        `Processed waiting task ${waitingTask.id} on machine ${machines[0]!}`
+      );
+    } catch (error) {
+      console.error(
+        `Failed processing waiting task ${waitingTask.id}, re-queuing`,
+        error
+      );
+      await addWaitingTaskToQueue(waitingTask);
+      throw error;
     }
   } catch (error) {
     console.error("Error processing waiting queue:", error);
-  } finally {
-    await releaseLock("waiting_queue", lockToken);
   }
 }
 
@@ -204,7 +249,9 @@ app.get("/tracking/:trackingId", async (c) => {
 });
 
 setInterval(() => {
-  void processWaitingQueue();
+  void processWaitingQueue().catch((error) =>
+    console.error("Background waiting queue sweep failed:", error)
+  );
 }, 5000);
 
 export default {

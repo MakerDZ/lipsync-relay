@@ -19,10 +19,10 @@ export async function releaseLock(key: string, token: string) {
   const lockKey = LOCK_PREFIX + key;
 
   await withRedis("releaseLock", async (redis) => {
-    const currentToken = await redis.get(lockKey);
-    if (currentToken === token) {
-      await redis.del(lockKey);
-    }
+  const currentToken = await redis.get(lockKey);
+  if (currentToken === token) {
+    await redis.del(lockKey);
+  }
   });
 }
 
