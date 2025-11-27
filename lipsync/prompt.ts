@@ -49,18 +49,16 @@ export async function generateVideoPrompt(
 
   // 4. Update Post Request Node (Node 307)
   if (promptTemplate["307"]) {
-    // A) inject webhook URL
-    promptTemplate["307"].inputs.target_url = webhookUrl;
-
-    // B) inject tracking ID
-    promptTemplate["307"].inputs.str1 = trackingId;
-
-    // C) update the request body
-    promptTemplate["307"].inputs.request_body = `{
-    "video_path": "__str0__",
-    "status": "completed",
-    "tracking_id": "__str1__"
-  }`;
+    const webhookNode = promptTemplate["307"];
+    webhookNode.inputs = webhookNode.inputs ?? {};
+    webhookNode.inputs.target_url = webhookUrl;
+    webhookNode.inputs.str0 = ["308", 0];
+    webhookNode.inputs.str1 = trackingId;
+    webhookNode.inputs.request_body = `{
+  "tracking_id": "__str1__",
+  "video_path": "__str0__",
+  "status": "completed"
+}`;
 
     console.log(
       `\t- Node 307 (Webhook) updated with URL: ${webhookUrl} & tracking: ${trackingId}`

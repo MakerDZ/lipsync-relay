@@ -9,6 +9,7 @@ import {
   updateGeneratedVideoPath,
   updateTaskStatus,
   getTaskByTrackingId,
+  getAllTasks,
 } from "./queue/task";
 import {
   addWaitingTaskToQueue,
@@ -32,6 +33,30 @@ function fileNameFromUrl(url: string, fallback: string): string {
   } catch {
     return fallback;
   }
+}
+
+function formatSecondsHuman(seconds?: number | null): string | null {
+  if (seconds == null || Number.isNaN(seconds) || !Number.isFinite(seconds)) {
+    return null;
+  }
+  if (seconds >= 60) {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds - minutes * 60;
+    const roundedSeconds = Math.round(remainingSeconds * 10) / 10;
+    return roundedSeconds > 0
+      ? `${minutes}m ${roundedSeconds}s`
+      : `${minutes}m`;
+  }
+  const rounded =
+    seconds >= 10 ? Math.round(seconds) : Math.round(seconds * 10) / 10;
+  return `${rounded}s`;
+}
+
+function formatMillisecondsHuman(ms?: number | null): string | null {
+  if (ms == null || Number.isNaN(ms) || !Number.isFinite(ms)) {
+    return null;
+  }
+  return formatSecondsHuman(ms / 1000);
 }
 
 // POST endpoint for generating video
@@ -252,6 +277,33 @@ app.get("/tracking/:trackingId", async (c) => {
   return c.json({
     tracking_id: trackingId,
     status: waitingTask ? "still_waiting_for_free_machine" : task?.status,
+  });
+});
+
+app.get("/tasks/completed", async (c) => {
+  const tasks = await getAllTasks();
+  const completedTasks = tasks.filter((task) => task.status === "completed");
+
+  const normalized = completedTasks.map((task) => {
+    const audioDurationSeconds = task.audio_duration_seconds ?? null;
+    const processingTimeMs = task.time_to_complete_ms ?? null;
+
+    return {
+      tracking_id: task.tracking_id,
+      machine: task.machine,
+      prompt: task.prompt,
+      created_at: task.created_at ?? null,
+      completed_at: task.completed_at ?? null,
+      audio_length_seconds: audioDurationSeconds,
+      audio_length_formatted: formatSecondsHuman(audioDurationSeconds),
+      processing_time_ms: processingTimeMs,
+      processing_time_formatted: formatMillisecondsHuman(processingTimeMs),
+    };
+  });
+
+  return c.json({
+    count: normalized.length,
+    tasks: normalized,
   });
 });
 
