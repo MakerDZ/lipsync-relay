@@ -41,6 +41,7 @@ export async function addWaitingTaskToQueue(
       };
 
       await redis.lpush("waiting_queue", JSON.stringify(waitingTask));
+      console.log(`\t- Waiting task added to queue: ${waitingTask.id}`);
       return waitingTask;
     });
   } catch (error) {

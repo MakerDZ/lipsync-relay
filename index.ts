@@ -70,12 +70,15 @@ app.post("/generate", async (c) => {
         uploadFileToR2(image),
         uploadFileToR2(audio),
       ]);
+
       await addWaitingTaskToQueue({
         id: trackingId,
         image_url: imageUrl,
         audio_url: audioUrl,
         prompt: prompt,
       });
+
+      console.log(`\t- Waiting task added to queue: ${trackingId}`);
       return c.json(
         {
           tracking_id: trackingId,
@@ -117,18 +120,22 @@ app.post("/generate", async (c) => {
 
 // Process waiting queue every 5 seconds
 async function processWaitingQueue(): Promise<void> {
+  console.log("================================================");
   console.log("Processing waiting queue");
   try {
-    const [waitingTask, machines] = await Promise.all([
-      getOneWaitingTaskFromQueue(),
-      getAvailableMachines(),
-    ]);
-
-    if (!waitingTask) {
+    const machines = await getAvailableMachines();
+    console.log(`\t- Machines: [${machines.join(", ")}]`);
+    if (machines.length === 0) {
+      console.log("\t- No machines available, skipping");
+      console.log("================================================");
       return;
     }
 
-    if (machines.length === 0) {
+    const waitingTask = await getOneWaitingTaskFromQueue();
+    console.log(`\t- Waiting task: [${waitingTask ?? "null"}]`);
+    console.log("================================================");
+
+    if (!waitingTask) {
       return;
     }
 

@@ -1,5 +1,3 @@
-import { Buffer } from "node:buffer";
-import { parseBuffer } from "music-metadata";
 import { generateVideoPrompt } from "./prompt";
 import { addTaskToQueue } from "../queue/task";
 import { getAudioDurationSeconds } from "../utils/audio";

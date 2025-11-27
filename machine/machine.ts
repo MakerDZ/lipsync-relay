@@ -12,7 +12,6 @@ export async function getAvailableMachines(): Promise<string[]> {
   const availableMachines = [];
 
   for (const machine of machines) {
-    console.log(`Checking machine ${machine}...`);
     try {
       const response = await fetch(`${machine}/queue`, {
         method: "GET",
